@@ -14,6 +14,7 @@ class VonageVoiceDigester extends DigesterInterface
     protected $channel;
     protected $langManager;
     protected $session;
+    protected $voiceAnswerAttribute;
 
     public function __construct($langManager, $conf, $session)
     {
@@ -21,6 +22,7 @@ class VonageVoiceDigester extends DigesterInterface
         $this->channel = 'vonageVoice';
         $this->conf = $conf;
         $this->session = $session;
+        $this->voiceAnswerAttribute = 'Answer_voice';
     }
 
     /**
@@ -56,10 +58,83 @@ class VonageVoiceDigester extends DigesterInterface
         $params = json_decode($request->body(), true);
         $input = Factory::createFromArray($params);
         if ($input->getSpeech() && isset($input->getSpeech()['results'][0]['text'])) {
-            $userMessage = $input->getSpeech()['results'][0]['text'];
+            $userMessage = $this->checkIfTypeExpected($input->getSpeech()['results'][0]['text']);
+
             return OptionSelector::checkOptions($userMessage, $this->session, $this->langManager->translate('no'));
         }
         return [];
+    }
+
+    /**
+     * Check if the reponse correspond to the type defined in previous response
+     * @param string $userMessage
+     * @return string
+     */
+    protected function checkIfTypeExpected(string $userMessage): string
+    {
+        if ($this->session->get('variableToExpect', '') === '') return $userMessage;
+
+        $variableType = $this->getVariableType();
+        if ($variableType === 'NUMBER') {
+            $userMessageTmp = str_replace(" ", "", trim($userMessage));
+            if (is_numeric($userMessageTmp)) {
+                $this->session->delete('variableToExpect');
+                $this->session->delete('variableDataType');
+                return $userMessageTmp;
+            }
+            $this->processSessionOnVarError();
+        } else if ($variableType === 'EMAIL') {
+            $userMessageTmp = $userMessage;
+            if (strpos($userMessageTmp, " at ") > 0) {
+                $userMessageTmp = str_replace(" at ", "@", $userMessageTmp);
+            }
+            if (strpos($userMessageTmp, " dot ") > 0) {
+                $userMessageTmp = str_replace(" dot ", ".", $userMessageTmp);
+            }
+            $userMessageTmp = str_replace(" ", "", trim(strtolower($userMessageTmp)));
+            if (filter_var($userMessageTmp, FILTER_VALIDATE_EMAIL)) {
+                $this->session->delete('variableToExpect');
+                $this->session->delete('variableDataType');
+                return $userMessageTmp;
+            }
+            $this->processSessionOnVarError();
+        } else {
+            $this->session->delete('variableToExpect');
+            $this->session->delete('variableDataType');
+        }
+        return $userMessage;
+    }
+
+    /**
+     * Process session vars for error on backstage variable error
+     */
+    protected function processSessionOnVarError()
+    {
+        $countErrors = $this->session->get('variableToExpectError', 0) + 1;
+        if ($countErrors === 1) $this->session->set('variableToExpectError', 1);
+        if ($countErrors >= $this->conf['default']['forms']['errorRetries']) {
+            $this->session->delete('variableToExpect');
+            $this->session->delete('variableToExpectError');
+            $this->session->delete('variableDataType');
+        }
+    }
+
+    /**
+     * Get the variable type for the expected voice value
+     * @return string $variableType
+     */
+    public function getVariableType(): string
+    {
+        $variableType = '';
+        $variablesTypes = $this->session->get('variablesTypes', []);
+        if (count($variablesTypes) > 0) {
+            $variableToExpect = $this->session->get('variableToExpect', '_');
+            $variableType = isset($variablesTypes[$variableToExpect]) ? $variablesTypes[$variableToExpect] : '';
+        }
+        if ($variableType === '' && $this->session->get('variableDataType', '') !== '') {
+            $variableType = strtoupper($this->session->get('variableDataType'));
+        }
+        return $variableType;
     }
 
     /**
@@ -138,7 +213,7 @@ class VonageVoiceDigester extends DigesterInterface
 
     protected function digestFromApiAnswer($message, $lastUserQuestion)
     {
-        $messageResponse = isset($message->messageList[0]) ? Helper::cleanMessage($message->messageList[0]) : '';
+        $messageResponse = $this->getTextMessage($message);
         if (trim($messageResponse) === '') {
             $messageResponse = '__EMPTY__';
         }
@@ -167,20 +242,52 @@ class VonageVoiceDigester extends DigesterInterface
     }
 
     /**
+     * Get the text message, first look for "Answer_voice" attribute
+     * if not exists or is empty, then look for the "normal"response
+     * @param object $message = null
+     * @return string
+     */
+    protected function getTextMessage(object $message = null): string
+    {
+        $voiceAnswerAttribute = $this->voiceAnswerAttribute;
+        if (isset($message->attributes->$voiceAnswerAttribute) && trim($message->attributes->$voiceAnswerAttribute) !== '') {
+            return trim($message->attributes->$voiceAnswerAttribute);
+        }
+        return isset($message->messageList[0]) ? Helper::cleanMessage($message->messageList[0]) : '';
+    }
+
+    /**
      * Validate if the message has action fields
      * @param object $message
      * @param string $lastUserQuestion
-     * @return array $output
+     * @return array
      */
     protected function handleMessageWithActionField(object $message, string $lastUserQuestion = null): array
     {
-        $output = [];
-        if (isset($message->actionField) && !empty($message->actionField) && $message->actionField->fieldType !== 'default') {
-            if ($message->actionField->fieldType === 'list') {
-                $output = $this->handleMessageWithListValues($message->actionField->listValues, $lastUserQuestion);
-            }
+        if (!isset($message->actionField)) return [];
+        if (empty($message->actionField)) return [];
+
+        $this->validateIfExpectingVariable($message->actionField);
+        if ($message->actionField->fieldType === 'default') return [];
+        if ($message->actionField->fieldType === 'list') {
+            return $this->handleMessageWithListValues($message->actionField->listValues, $lastUserQuestion);
         }
-        return $output;
+        return [];
+    }
+
+    /**
+     * Validate if action field has an expecting value
+     * this will help to detect the context of the requested variable
+     * @param object $actionField
+     */
+    protected function validateIfExpectingVariable(object $actionField)
+    {
+        if (!isset($actionField->variableName)) return;
+        if (!isset($actionField->dataType)) return;
+        if ($actionField->variableName === '') return;
+        if ($actionField->dataType === '') return;
+        $this->session->set('variableToExpect', $actionField->variableName);
+        $this->session->set('variableDataType', $actionField->dataType);
     }
 
     /**

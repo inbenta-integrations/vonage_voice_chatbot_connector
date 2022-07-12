@@ -71,26 +71,46 @@ class VonageVoiceAPIClient
     /**
      * Creates the structure for Vonage response
      * @param string $message
+     * @param string $variableType = ''
      * @return array
      */
-    public function vonageStructure(string $message): array
+    public function vonageStructure(string $message, string $variableType = ''): array
     {
         $ncco = new NCCO();
         $ncco->addAction(Talk::factory($message, ['language' => $this->voiceLang]));
 
         if ($this->escalationPhoneNumber !== '' && $this->vonagePhoneNumber !== '') {
-            $escalationAction = $this->escalationVonageAction();
-            $ncco->addAction($escalationAction);
+            $ncco->addAction($this->escalationVonageAction());
         } else {
             $inputAction = new Input();
             $inputAction
-                ->setSpeechEndOnSilence(true)
+                ->setSpeechEndOnSilence(0.5)
                 ->setSpeechLanguage($this->voiceLang)
                 ->setEventWebhook(new Webhook($this->url));
+
+            $context = $this->setContext($variableType);
+            if (count($context) > 0) {
+                $inputAction->setSpeechContext($context);
+            }
             $ncco->addAction($inputAction);
         }
-
         return $ncco->toArray();
+    }
+
+    /**
+     * Set the context based on the variable type
+     * @param string $variableType = ''
+     * @return array
+     */
+    protected function setContext(string $variableType = ''): array
+    {
+        if ($variableType === 'NUMBER') {
+            return ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'];
+        }
+        if ($variableType === 'EMAIL') {
+            return ['email', 'email address'];
+        }
+        return [];
     }
 
     /**

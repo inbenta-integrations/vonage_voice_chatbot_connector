@@ -14,14 +14,14 @@ $appPath = __DIR__ . '/';
 
 //Start conversation
 $router->respond('GET', '/answer', function (Request $request, Response $response) use ($appPath) {
-    $app = new VonageVoiceConnector($appPath); // Instance Connector
-    return $app->handleUserMessage($request, $response);
+    $app = new VonageVoiceConnector($appPath, $request); // Instance Connector
+    return $app->handleUserMessage($response);
 });
 
 //Flow of the conversation
 $router->respond('POST', '/asr', function (Request $request, Response $response) use ($appPath) {
-    $app = new VonageVoiceConnector($appPath); // Instance Connector
-    return $app->handleUserMessage($request, $response);
+    $app = new VonageVoiceConnector($appPath, $request); // Instance Connector
+    return $app->handleUserMessage($response);
 });
 
 //Check status

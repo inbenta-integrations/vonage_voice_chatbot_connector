@@ -19,12 +19,13 @@ class VonageVoiceConnector extends ChatbotConnector
     private $messages = "";
     private $request;
 
-    public function __construct($appPath)
+    public function __construct(string $appPath, Request $request)
     {
         // Initialize and configure specific components for VonageVoice
         try {
 
             parent::__construct($appPath);
+            $this->request = $request;
 
             //Validate security header
             $this->securityCheck();
@@ -48,6 +49,8 @@ class VonageVoiceConnector extends ChatbotConnector
                 $conversationConf
             );
 
+            $this->getVariablesTypes();
+
             //
             $externalClient = new VonageVoiceAPIClient(
                 $this->conf->get('vonage')
@@ -56,7 +59,7 @@ class VonageVoiceConnector extends ChatbotConnector
             // Instance VonageVoice digester
             $externalDigester = new VonageVoiceDigester(
                 $this->lang,
-                $this->conf->get('conversation.digester'),
+                $this->conf->get('conversation'),
                 $this->session
             );
 
@@ -171,21 +174,40 @@ class VonageVoiceConnector extends ChatbotConnector
     }
 
     /**
+     * Get the variables types defined in Backstage (METADATA_[variableName]_TYPE)
+     * this will help to understand the context from variables, example: numbers
+     */
+    protected function getVariablesTypes()
+    {
+        if (!$this->session->get('variablesTypes', false)) {
+            $variables = [];
+            $variablesChatbot = $this->botClient->getVariables();
+
+            foreach ($variablesChatbot as $key => $variable) {
+                if (strpos($key, "metadata_") === false) continue;
+                if (strpos($key, "_type") === false) continue;
+                $key = str_replace(["metadata_", "_type"], "", $key);
+                $variables[$key] = $variable->value;
+            }
+            $this->session->set('variablesTypes', $variables);
+        }
+    }
+
+    /**
      * Handle message from user
-     * @param Request $request
      * @param Response $response
      * @return Response $response->json
      */
-    public function handleUserMessage(Request $request, Response $response)
+    public function handleUserMessage(Response $response)
     {
         try {
-            $this->request = $request;
             $this->validateRequest();
-            $this->externalClient->setUrlConnector($request);
+            $this->externalClient->setUrlConnector($this->request);
 
             $message = $this->handleRequest();
             $message = trim($message) === '' ? $this->lang->translate('on_empty_message') : $message;
-            $vonageResponse = $this->externalClient->vonageStructure($message);
+            $variableType = $this->digester->getVariableType();
+            $vonageResponse = $this->externalClient->vonageStructure($message, $variableType);
 
             return $response->json($vonageResponse);
         } catch (Exception $e) {
@@ -314,7 +336,7 @@ class VonageVoiceConnector extends ChatbotConnector
         ) {
             return $this->escalateToAgent();
         }
-        //Any other response that is no "yes" (or similar) it's going to be considered as "no"
+        //Any other response that is different to "yes" (or similar) it's going to be considered as "no"
         $message = ["option" => strtolower($this->lang->translate('no'))];
         $botResponse = $this->sendMessageToBot($message);
         $this->sendMessagesToExternal($botResponse);
@@ -334,10 +356,9 @@ class VonageVoiceConnector extends ChatbotConnector
             $this->externalClient->setPhoneNumbers($this->request, $this->conf->get('chat.chat.phoneNumber'));
 
             return $this->digester->buildEscalatedMessage();
-        } else {
-            $this->trackContactEvent("CHAT_NO_AGENTS");
-            // throw out of time message
-            return $this->lang->translate('out_of_time');
         }
+        $this->trackContactEvent("CHAT_NO_AGENTS");
+        // throw out of time message
+        return $this->lang->translate('out_of_time');
     }
 }
